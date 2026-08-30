@@ -1,0 +1,78 @@
+name: Build and Deploy to EKS
+
+# CI is triggered whenever new changes are pushed to main
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: {}   # lets you click "Run workflow" manually in the Actions tab
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: hello-cicd-portfolio
+  EKS_CLUSTER: hello-cicd-cluster
+  NAMESPACE: hello-cicd
+  DEPLOYMENT_NAME: portfolio-app
+  CONTAINER_NAME: portfolio-app
+
+jobs:
+  build-and-deploy:
+    name: Build, Push, Deploy
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write   # needed for OIDC auth to AWS
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # --- Auth to AWS using OIDC (no long-lived secrets needed) ---
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # --- Build image and push to ECR ---
+      - name: Build, tag, and push image to ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      # --- Point kubectl at the EKS cluster ---
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name $EKS_CLUSTER --region $AWS_REGION
+
+      # --- Apply manifests (namespace, HPA are idempotent; deployment image gets updated) ---
+      - name: Apply base manifests
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/service.yaml
+          kubectl apply -f k8s/hpa.yaml
+
+      - name: Deploy new image to EKS
+        env:
+          NEW_IMAGE: ${{ steps.build-image.outputs.image }}
+        run: |
+          kubectl apply -f k8s/deployment.yaml
+          kubectl set image deployment/$DEPLOYMENT_NAME \
+            $CONTAINER_NAME=$NEW_IMAGE \
+            -n $NAMESPACE
+          kubectl rollout status deployment/$DEPLOYMENT_NAME -n $NAMESPACE --timeout=120s
+
+      - name: Show service URL
+        run: |
+          kubectl get service portfolio-app-service -n $NAMESPACE \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'

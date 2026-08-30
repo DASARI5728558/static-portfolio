@@ -1,0 +1,24 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: hello-cicd-cluster
+  region: us-east-1
+  version: "1.30"
+
+# Managed node group (EC2-backed). Swap for a fargateProfile below
+# if you'd rather run fully serverless nodes.
+managedNodeGroups:
+  - name: hello-cicd-nodes
+    instanceType: t3.small
+    desiredCapacity: 2
+    minSize: 2
+    maxSize: 4
+    volumeSize: 20
+    ssh:
+      allow: false
+
+# Enables IAM Roles for Service Accounts (needed for the Load Balancer
+# controller and for CI/CD to authenticate cleanly)
+iam:
+  withOIDC: true

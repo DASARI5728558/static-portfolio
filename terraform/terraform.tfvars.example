@@ -1,0 +1,12 @@
+# Copy this to terraform.tfvars and fill in your values.
+# terraform.tfvars is gitignored — never commit real values if they're sensitive.
+
+aws_region   = "us-east-1"
+project_name = "hello-cicd"
+
+github_org  = "dasariramprasad"   # your GitHub username or org
+github_repo = "hello-cicd-eks"    # your repo name
+
+# Set to false if you already created the GitHub OIDC provider
+# manually in the console earlier — avoids a "already exists" error.
+create_oidc_provider = false

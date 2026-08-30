@@ -1,0 +1,93 @@
+name: Terraform Infra
+
+# Auto-triggers ONLY when terraform files change — keeps this
+# separate from the app deploy.yml workflow, which triggers on
+# any push (app code changes shouldn't re-run infra).
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "terraform/**"
+      - "!terraform/bootstrap/**"
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "terraform/**"
+      - "!terraform/bootstrap/**"
+
+env:
+  AWS_REGION: us-east-1
+  TF_WORKING_DIR: terraform
+
+permissions:
+  id-token: write     # needed for OIDC auth to AWS
+  contents: read
+  pull-requests: write # so the plan can be posted as a PR comment
+
+jobs:
+  terraform:
+    name: Terraform Plan/Apply
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.TF_AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.8.5"
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+        continue-on-error: true
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      # On a PR: show the plan for review, don't apply
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -no-color -out=tfplan
+        continue-on-error: true
+
+      - name: Post plan to PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `#### Terraform Plan
+            \`\`\`
+            ${{ steps.plan.outputs.stdout }}
+            \`\`\``;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+      - name: Fail job if plan failed
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+      # Only apply automatically on a real push to main (not PRs)
+      - name: Terraform Apply
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: terraform apply -auto-approve tfplan
+
+      - name: Show outputs
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: terraform output
