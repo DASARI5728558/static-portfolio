@@ -20,18 +20,20 @@ env:
   TF_WORKING_DIR: terraform
 
 permissions:
-  id-token: write     # needed for OIDC auth to AWS
+  id-token: write      # needed for OIDC auth to AWS
   contents: read
-  pull-requests: write # so the plan can be posted as a PR comment
+  pull-requests: write  # so the plan can be posted as a PR comment
 
 jobs:
   terraform:
     name: Terraform Plan/Apply
     runs-on: ubuntu-latest
+    # Skip entirely for PRs from forks — forked PRs don't get repo secrets,
+    # so role-to-assume would resolve empty and fail credential loading.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     defaults:
       run:
         working-directory: ${{ env.TF_WORKING_DIR }}
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -57,10 +59,16 @@ jobs:
       - name: Terraform Validate
         run: terraform validate
 
-      # On a PR: show the plan for review, don't apply
+      # On a PR: show the plan for review, don't apply.
+      # `run:` steps don't auto-populate outputs.stdout — capture it manually.
       - name: Terraform Plan
         id: plan
-        run: terraform plan -no-color -out=tfplan
+        run: |
+          set +e
+          terraform plan -no-color -out=tfplan > plan_output.txt 2>&1
+          echo "exitcode=$?" >> "$GITHUB_OUTPUT"
+          cat plan_output.txt
+          exit 0
         continue-on-error: true
 
       - name: Post plan to PR
@@ -68,10 +76,22 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            const fs = require('fs');
+            const path = require('path');
+            const workDir = process.env.TF_WORKING_DIR;
+            let planOutput = fs.readFileSync(path.join(workDir, 'plan_output.txt'), 'utf8');
+
+            // GitHub comment bodies have a size limit — truncate long plans
+            const maxLen = 60000;
+            if (planOutput.length > maxLen) {
+              planOutput = planOutput.slice(0, maxLen) + '\n\n... (truncated)';
+            }
+
             const output = `#### Terraform Plan
             \`\`\`
-            ${{ steps.plan.outputs.stdout }}
+            ${planOutput}
             \`\`\``;
+
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
@@ -80,7 +100,7 @@ jobs:
             });
 
       - name: Fail job if plan failed
-        if: steps.plan.outcome == 'failure'
+        if: steps.plan.outputs.exitcode == '1'
         run: exit 1
 
       # Only apply automatically on a real push to main (not PRs)
